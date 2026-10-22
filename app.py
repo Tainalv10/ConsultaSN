@@ -19,7 +19,6 @@ texto_cnpjs = st.text_area(
 
 # Botão para iniciar a busca
 if st.button("🚀 Iniciar Consulta", type="primary"):
-    # Separa a lista de CNPJs linha por linha
     cnpjs = [linha.strip() for linha in texto_cnpjs.split("\n") if linha.strip()]
     
     if not cnpjs:
@@ -74,21 +73,17 @@ if st.button("🚀 Iniciar Consulta", type="primary"):
                         "MEI / SIMEI": "N/A"
                     })
                 
-                # Aguarda para respeitar o limite gratuito da API
                 if i < total - 1:
                     time.sleep(20)
             
-            # Atualiza a barra de progresso no site
             progresso.progress((i + 1) / total)
 
         status_texto.success("✅ Consulta finalizada com sucesso!")
         
-        # Mostra a tabela com os resultados
         df = pd.DataFrame(resultados)
         st.subheader("📊 Resultados:")
         st.dataframe(df, use_container_width=True)
         
-        # Cria o arquivo Excel para o usuário baixar
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='CNPJs')
@@ -97,4 +92,5 @@ if st.button("🚀 Iniciar Consulta", type="primary"):
             label="📥 Baixar Planilha em Excel (.xlsx)",
             data=buffer.getvalue(),
             file_name="resultado_cnpjs.xlsx",
-            mime="application/vnd.openxml
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
