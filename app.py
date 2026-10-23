@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
 import time
 import io
 
@@ -9,54 +8,69 @@ import io
 st.set_page_config(page_title="Consulta Simples Nacional - Híbrido", page_icon="🏢", layout="wide")
 
 st.title("🏢 Consulta de CNPJs - Simples Nacional e Regime Híbrido (IBS/CBS)")
-st.write("Insira os CNPJs (um por linha) para verificar o enquadramento no Simples Nacional, MEI e Regime Híbrido (IBS/CBS).")
+st.write("Insira os CNPJs abaixo (um por linha) para verificar o enquadramento fiscal.")
 
 texto_cnpjs = st.text_area(
     "CNPJs para consulta:",
     height=150,
-    placeholder="03.294.984/0001-59\n33.000.167/0001-01"
+    placeholder="02.760.464/0001-21\n03.294.984/0001-59"
 )
 
-def consultar_receita(cnpj_limpo):
-    url = f"https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/GAS158/Simples.app/Simples/Exibir/{cnpj_limpo}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+def consultar_cnpj(cnpj_limpo):
+    # 1. Consulta via BrasilAPI (Rápida e sem erros 404)
+    url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
     
     try:
-        response = requests.get(url, headers=headers, timeout=12)
+        response = requests.get(url, timeout=10)
+        
         if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            texto_pagina = soup.get_text()
+            dados = response.json()
             
-            # 1. Verifica Simples Nacional
-            optante_simples = "SIM" if "Optante pelo Simples Nacional desde" in texto_pagina else "NÃO"
+            razao_social = dados.get("razao_social", "N/A")
+            opcao_simples = dados.get("opcao_pelo_simples")
+            opcao_mei = dados.get("opcao_pelo_mei")
             
-            # 2. Verifica MEI / SIMEI
-            optante_mei = "SIM" if "Enquadrado no SIMEI desde" in texto_pagina else "NÃO"
+            simples_str = "SIM" if opcao_simples is True else ("NÃO" if opcao_simples is False else "Não informado")
+            mei_str = "SIM" if opcao_mei is True else ("NÃO" if opcao_mei is False else "Não informado")
             
-            # 3. Verifica se é HÍBRIDO (Eventos Futuros no Regime Regular IBS/CBS)
-            # Se constar "Opção pelo regime regular" dentro da tabela de eventos futuros
-            eh_hibrido = "NÃO"
-            if "Opção pelo regime regular" in texto_pagina or "Eventos Futuros (Regime Regular IBS/CBS)" in texto_pagina:
-                # Busca se há opção explícita cadastrada nos eventos futuros
-                if "Opção pelo regime regular" in texto_pagina:
-                    eh_hibrido = "SIM (Híbrido)"
+            # 2. Verificação do Regime Híbrido (IBS/CBS)
+            # Empresas optantes pelo Simples que possuem opção declarada para o recolhimento regular do IBS/CBS
+            hibrido_str = "NÃO"
             
-            # Extrai Razão Social se disponível
-            razao_social = "Não identificada"
-            for linha in texto_pagina.split('\n'):
-                if "Nome Empresarial:" in linha:
-                    razao_social = linha.replace("Nome Empresarial:", "").strip()
-                    break
-
+            # Tenta buscar os dados adicionais de eventos futuros na API complementar do CNPJ.ws
+            try:
+                url_ws = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
+                resp_ws = requests.get(url_ws, timeout=8)
+                if resp_ws.status_code == 200:
+                    dados_ws = resp_ws.json()
+                    simples_data = dados_ws.get("simples") or {}
+                    
+                    # Checa presença de eventos futuros do regime regular IBS/CBS
+                    eventos = simples_data.get("eventos_futuros") or []
+                    for evento in eventos:
+                        if "IBS" in str(evento) or "CBS" in str(evento) or "regular" in str(evento).lower():
+                            hibrido_str = "SIM (Híbrido)"
+                            break
+            except Exception:
+                pass
+                
             return {
                 "CNPJ": cnpj_limpo,
                 "Razão Social": razao_social,
-                "Simples Nacional": optante_simples,
-                "MEI / SIMEI": optante_mei,
-                "Híbrido (IBS/CBS Regular)": eh_hibrido,
+                "Simples Nacional": simples_str,
+                "MEI / SIMEI": mei_str,
+                "Híbrido (IBS/CBS Regular)": hibrido_str,
                 "Status": "Sucesso"
+            }
+            
+        elif response.status_code == 404:
+            return {
+                "CNPJ": cnpj_limpo,
+                "Razão Social": "N/A",
+                "Simples Nacional": "N/A",
+                "MEI / SIMEI": "N/A",
+                "Híbrido (IBS/CBS Regular)": "N/A",
+                "Status": "CNPJ Não Encontrado"
             }
         else:
             return {
@@ -65,8 +79,9 @@ def consultar_receita(cnpj_limpo):
                 "Simples Nacional": "Erro",
                 "MEI / SIMEI": "Erro",
                 "Híbrido (IBS/CBS Regular)": "Erro",
-                "Status": f"HTTP {response.status_code}"
+                "Status": f"Erro HTTP {response.status_code}"
             }
+            
     except Exception as e:
         return {
             "CNPJ": cnpj_limpo,
@@ -74,7 +89,7 @@ def consultar_receita(cnpj_limpo):
             "Simples Nacional": "Erro",
             "MEI / SIMEI": "Erro",
             "Híbrido (IBS/CBS Regular)": "Erro",
-            "Status": "Falha na conexão"
+            "Status": "Falha na Conexão"
         }
 
 if st.button("🚀 Iniciar Consulta", type="primary"):
@@ -97,18 +112,18 @@ if st.button("🚀 Iniciar Consulta", type="primary"):
                 resultados.append({
                     "CNPJ": cnpj,
                     "Razão Social": "N/A",
-                    "Simples Nacional": "Invalido",
+                    "Simples Nacional": "Inválido",
                     "MEI / SIMEI": "N/A",
                     "Híbrido (IBS/CBS Regular)": "N/A",
                     "Status": "CNPJ Inválido"
                 })
             else:
-                res = consultar_receita(cnpj_limpo)
+                res = consultar_cnpj(cnpj_limpo)
                 resultados.append(res)
                 
-                # Pequena pausa para evitar bloqueio do servidor
+                # Pausa leve de 1 segundo para estabilidade
                 if i < total - 1:
-                    time.sleep(2)
+                    time.sleep(1)
             
             progresso.progress((i + 1) / total)
 
@@ -118,7 +133,14 @@ if st.button("🚀 Iniciar Consulta", type="primary"):
         st.subheader("📊 Resultados:")
         st.dataframe(df, use_container_width=True)
         
-        # Gera arquivo Excel
+        # Cria a planilha Excel para download
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='CNPJs')
+        
+        st.download_button(
+            label="📥 Baixar Planilha Excel (.xlsx)",
+            data=buffer.getvalue(),
+            file_name="resultado_cnpjs_hibrido.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
