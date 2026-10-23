@@ -1,15 +1,23 @@
 import streamlit as st
 import pandas as pd
-import requests
 from bs4 import BeautifulSoup
 import time
 import io
+import subprocess
+import os
+
+# Instala os navegadores do Playwright se não estiverem instalados no servidor
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    subprocess.run(["playwright", "install", "chromium"])
+    from playwright.sync_api import sync_playwright
 
 # Configuração da página
 st.set_page_config(page_title="Consulta Simples Nacional - Híbrido", page_icon="🏢", layout="wide")
 
 st.title("🏢 Consulta de CNPJs - Simples Nacional e Regime Híbrido (IBS/CBS)")
-st.write("Insira os CNPJs abaixo (um por linha) para verificar a situação no Simples Nacional e Regime Híbrido.")
+st.write("Insira os CNPJs abaixo (um por linha) para verificar o enquadramento fiscal e regime Híbrido.")
 
 texto_cnpjs = st.text_area(
     "CNPJs para consulta:",
@@ -17,68 +25,45 @@ texto_cnpjs = st.text_area(
     placeholder="02.760.464/0001-21\n03.294.984/0001-59"
 )
 
-def consultar_via_api_fallback(cnpj_limpo):
-    try:
-        url = f"https://publica.cnpj.ws/cnpj/{cnpj_limpo}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            dados = resp.json()
-            simples = dados.get("simples") or {}
-            opt_s = simples.get("optante")
-            opt_m = simples.get("simples")
+def consultar_com_navegador(cnpj_limpo):
+    url = "https://www8.receita.fazenda.gov.br/simplesnacional/aplicacoes.aspx?id=21"
+    
+    with sync_playwright() as p:
+        # Abre o navegador em modo invisível (headless)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page()
+        
+        try:
+            page.goto(url, wait_until="networkidle", timeout=25000)
             
-            return {
-                "CNPJ": cnpj_limpo,
-                "Razão Social": dados.get("razao_social", "N/A"),
-                "Simples Nacional": "SIM" if opt_s else "NÃO",
-                "MEI / SIMEI": "SIM" if opt_m else "NÃO",
-                "Híbrido (IBS/CBS Regular)": "Verificar Manualmente",
-                "Status": "Sucesso (Via API)"
-            }
-    except Exception:
-        pass
-        
-    return {
-        "CNPJ": cnpj_limpo,
-        "Razão Social": "N/A",
-        "Simples Nacional": "Erro",
-        "MEI / SIMEI": "Erro",
-        "Híbrido (IBS/CBS Regular)": "Erro",
-        "Status": "Falha na requisição"
-    }
-
-def consultar_receita_simples(cnpj_limpo):
-    session = requests.Session()
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www8.receita.fazenda.gov.br/simplesnacional/aplicacoes.aspx?id=21"
-    }
-    
-    try:
-        init_url = "https://www8.receita.fazenda.gov.br/simplesnacional/aplicacoes.aspx?id=21"
-        session.get(init_url, headers=headers, timeout=10)
-        
-        post_url = "https://www8.receita.fazenda.gov.br/SimplesNacional/Aplicacoes/GAS158/Simples.app/Simples/Exibir"
-        payload = {"Cnpj": cnpj_limpo}
-        
-        response = session.post(post_url, data=payload, headers=headers, timeout=12)
-        
-        if response.status_code == 200 and "Situação Atual" in response.text:
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # Preenche o campo do CNPJ
+            page.fill("input[name*='Cnpj']", cnpj_limpo)
+            
+            # Clica no botão de consulta
+            page.click("button[type='submit'], input[type='submit']")
+            page.wait_for_load_state("networkidle", timeout=25000)
+            
+            # Obtém o conteúdo HTML completo retornado pela Receita
+            html = page.content()
+            browser.close()
+            
+            soup = BeautifulSoup(html, 'html.parser')
             texto = soup.get_text()
             
+            # 1. Razão Social
             razao_social = "N/A"
             for linha in texto.split('\n'):
                 if "Nome Empresarial:" in linha:
                     razao_social = linha.replace("Nome Empresarial:", "").strip()
                     break
             
+            # 2. Simples Nacional
             optante_simples = "SIM" if "Optante pelo Simples Nacional desde" in texto else "NÃO"
+            
+            # 3. MEI / SIMEI
             optante_mei = "SIM" if "Enquadrado no SIMEI desde" in texto else "NÃO"
             
+            # 4. REGIME HÍBRIDO (Eventos Futuros IBS/CBS)
             eh_hibrido = "NÃO"
             if "Opção pelo regime regular" in texto:
                 eh_hibrido = "SIM (Híbrido)"
@@ -91,11 +76,17 @@ def consultar_receita_simples(cnpj_limpo):
                 "Híbrido (IBS/CBS Regular)": eh_hibrido,
                 "Status": "Sucesso"
             }
-        else:
-            return consultar_via_api_fallback(cnpj_limpo)
             
-    except Exception:
-        return consultar_via_api_fallback(cnpj_limpo)
+        except Exception as e:
+            browser.close()
+            return {
+                "CNPJ": cnpj_limpo,
+                "Razão Social": "N/A",
+                "Simples Nacional": "Erro",
+                "MEI / SIMEI": "Erro",
+                "Híbrido (IBS/CBS Regular)": "Erro na Consulta",
+                "Status": f"Falha ao carregar página oficial"
+            }
 
 if st.button("🚀 Iniciar Consulta", type="primary"):
     cnpjs = [linha.strip() for linha in texto_cnpjs.split("\n") if linha.strip()]
@@ -123,7 +114,7 @@ if st.button("🚀 Iniciar Consulta", type="primary"):
                     "Status": "CNPJ Inválido"
                 })
             else:
-                res = consultar_receita_simples(cnpj_limpo)
+                res = consultar_com_navegador(cnpj_limpo)
                 resultados.append(res)
                 
                 if i < total - 1:
